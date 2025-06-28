@@ -1,0 +1,4 @@
+[
+  {"nickname":"TestRelay1","address":"10.0.0.100","or_port":9001,"dir_port":9030,"bandwidth":0,"published":1751128365,"uptime":0,"flags":{"exit":false,"guard":false,"stable":false,"fast":false,"valid":true,"running":true},"identity_key":"0000000000000000000000000000000000000000000000000000000000000000","onion_key":"0000000000000000000000000000000000000000000000000000000000000000"},
+  {"nickname":"TestExit1","address":"10.0.0.101","or_port":9001,"dir_port":9030,"bandwidth":0,"published":1751128375,"uptime":0,"flags":{"exit":true,"guard":false,"stable":false,"fast":false,"valid":true,"running":true},"identity_key":"0000000000000000000000000000000000000000000000000000000000000000","onion_key":"0000000000000000000000000000000000000000000000000000000000000000"}
+]

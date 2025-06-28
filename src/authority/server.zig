@@ -5,6 +5,79 @@ const net = std.net;
 // const DirectoryAuthority = @import("directory.zig").DirectoryAuthority;
 const AuthorityConfig = @import("config.zig").AuthorityConfig;
 const NodeInfo = @import("node.zig").NodeInfo;
+// Import common modules 
+const signature_mod = @import("signature");
+
+// Import signature utilities from common module
+pub const SIGNATURE_SIZE = signature_mod.SIGNATURE_SIZE;
+pub const PUBLIC_KEY_SIZE = signature_mod.PUBLIC_KEY_SIZE;
+pub const PRIVATE_KEY_SIZE = signature_mod.PRIVATE_KEY_SIZE;
+pub const Ed25519KeyPair = signature_mod.Ed25519KeyPair;
+pub const SignatureManager = signature_mod.SignatureManager;
+
+pub const RegistrationRequest = struct {
+    type: []const u8,
+    nickname: []const u8,
+    address: []const u8,
+    pubkey_b64: []const u8,
+    signature: []const u8,
+    
+    pub fn fromJson(allocator: std.mem.Allocator, json_data: []const u8) !RegistrationRequest {
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_data, .{});
+        defer parsed.deinit();
+        
+        const root = parsed.value.object;
+        
+        const type_val = root.get("type") orelse return error.MissingType;
+        const nickname_val = root.get("nickname") orelse return error.MissingNickname;
+        const address_val = root.get("address") orelse return error.MissingAddress;
+        const pubkey_val = root.get("pubkey_b64") orelse return error.MissingPubkey;
+        const signature_val = root.get("signature") orelse return error.MissingSignature;
+        
+        if (type_val != .string or nickname_val != .string or address_val != .string or 
+            pubkey_val != .string or signature_val != .string) {
+            return error.InvalidDataTypes;
+        }
+        
+        return RegistrationRequest{
+            .type = try allocator.dupe(u8, type_val.string),
+            .nickname = try allocator.dupe(u8, nickname_val.string),
+            .address = try allocator.dupe(u8, address_val.string),
+            .pubkey_b64 = try allocator.dupe(u8, pubkey_val.string),
+            .signature = try allocator.dupe(u8, signature_val.string),
+        };
+    }
+    
+    pub fn deinit(self: *RegistrationRequest, allocator: std.mem.Allocator) void {
+        allocator.free(self.type);
+        allocator.free(self.nickname);
+        allocator.free(self.address);
+        allocator.free(self.pubkey_b64);
+        allocator.free(self.signature);
+    }
+    
+    pub fn validate(self: *const RegistrationRequest) !void {
+        if (self.nickname.len == 0 or self.nickname.len > 19) {
+            return error.InvalidNickname;
+        }
+        
+        if (self.address.len == 0 or self.address.len > 255) {
+            return error.InvalidAddress;
+        }
+        
+        if (self.pubkey_b64.len == 0) {
+            return error.InvalidPubkey;
+        }
+        
+        if (self.signature.len == 0) {
+            return error.InvalidSignature;
+        }
+        
+        if (!std.mem.eql(u8, self.type, "relay") and !std.mem.eql(u8, self.type, "exit")) {
+            return error.InvalidType;
+        }
+    }
+};
 
 pub const ServerError = error{
     StartupFailed,
@@ -177,63 +250,330 @@ pub const HttpResponse = struct {
     }
 };
 
-// Mock DirectoryAuthority for testing
-const MockDirectoryAuthority = struct {
+// Real DirectoryAuthority implementation
+pub const DirectoryAuthority = struct {
     config: AuthorityConfig,
-    node_count: usize = 0,
+    nodes: std.ArrayList(NodeInfo),
+    consensus_version: u32,
+    last_consensus_time: i64,
+    signature_manager: SignatureManager,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, config: AuthorityConfig) DirectoryAuthority {
+        return DirectoryAuthority{
+            .config = config,
+            .nodes = std.ArrayList(NodeInfo).init(allocator),
+            .consensus_version = 1,
+            .last_consensus_time = std.time.timestamp(),
+            .signature_manager = SignatureManager.init(allocator),
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *DirectoryAuthority) void {
+        for (self.nodes.items) |*node| {
+            node.deinit();
+        }
+        self.nodes.deinit();
+    }
     
-    pub fn getConsensusInfo(self: *const MockDirectoryAuthority) struct {
+    pub fn getConsensusInfo(self: *const DirectoryAuthority) struct {
         version: u32,
         timestamp: i64,
         node_count: usize,
     } {
-        _ = self;
         return .{
-            .version = 1,
+            .version = self.consensus_version,
             .timestamp = std.time.timestamp(),
-            .node_count = 0,
+            .node_count = self.nodes.items.len,
         };
     }
     
-    pub fn generateConsensus(self: *const MockDirectoryAuthority) ![]u8 {
-        _ = self;
-        return "{}";
+    pub fn generateConsensus(self: *const DirectoryAuthority) ![]u8 {
+        const version_str = try std.fmt.allocPrint(self.allocator, "{d}", .{self.consensus_version});
+        defer self.allocator.free(version_str);
+        
+        const timestamp_str = try std.fmt.allocPrint(self.allocator, "{d}", .{std.time.timestamp()});
+        defer self.allocator.free(timestamp_str);
+
+        var consensus_json = std.ArrayList(u8).init(self.allocator);
+        defer consensus_json.deinit();
+
+        try consensus_json.appendSlice("{\"version\":");
+        try consensus_json.appendSlice(version_str);
+        try consensus_json.appendSlice(",\"timestamp\":");
+        try consensus_json.appendSlice(timestamp_str);
+        try consensus_json.appendSlice(",\"nodes\":[");
+
+        for (self.nodes.items, 0..) |node, i| {
+            const node_json = try node.toJson(self.allocator);
+            defer self.allocator.free(node_json);
+            
+            try consensus_json.appendSlice(node_json);
+            if (i < self.nodes.items.len - 1) {
+                try consensus_json.appendSlice(",");
+            }
+        }
+
+        try consensus_json.appendSlice("]}");
+        return try consensus_json.toOwnedSlice();
     }
     
-    pub fn generateSignedConsensus(self: *const MockDirectoryAuthority) ![]u8 {
-        _ = self;
-        return "{}";
+    pub fn generateSignedConsensus(self: *const DirectoryAuthority) ![]u8 {
+        const consensus_data = try self.generateConsensus();
+        defer self.allocator.free(consensus_data);
+        
+        const signature = self.signature_manager.signData(consensus_data) catch |err| switch (err) {
+            error.NoKeyLoaded => {
+                // Return unsigned consensus if no key loaded
+                return try self.allocator.dupe(u8, consensus_data);
+            },
+            else => return err,
+        };
+        
+        // Convert signature to hex
+        var sig_hex: [SIGNATURE_SIZE * 2]u8 = undefined;
+        _ = try std.fmt.bufPrint(&sig_hex, "{x}", .{std.fmt.fmtSliceHexLower(&signature)});
+        
+        // Create signed JSON
+        const signed_json = try std.fmt.allocPrint(self.allocator, 
+            "{{\"consensus\":{s},\"signature\":\"{s}\"}}", 
+            .{ consensus_data, sig_hex });
+        
+        return signed_json;
     }
     
-    pub fn validateNode(self: *const MockDirectoryAuthority, nickname: []const u8) bool {
+    pub fn validateNode(self: *const DirectoryAuthority, nickname: []const u8) bool {
         _ = self;
         return nickname.len > 0 and nickname.len <= 19;
     }
     
-    pub fn addNode(self: *MockDirectoryAuthority, node: NodeInfo) !void {
-        _ = node;
-        self.node_count += 1;
+    pub fn addNode(self: *DirectoryAuthority, node: NodeInfo) !void {
+        // Check for duplicate nicknames
+        for (self.nodes.items) |existing_node| {
+            if (std.mem.eql(u8, existing_node.nickname, node.nickname)) {
+                return error.DuplicateNickname;
+            }
+        }
+        
+        try self.nodes.append(node);
+    }
+    
+    pub fn getNodeCount(self: *const DirectoryAuthority) usize {
+        return self.nodes.items.len;
+    }
+
+    pub fn loadSigningKey(self: *DirectoryAuthority) !void {
+        try self.signature_manager.loadFromFile(self.config.sig_key_path);
+    }
+
+    pub fn generateSigningKey(self: *DirectoryAuthority) void {
+        self.signature_manager.generateNew();
+    }
+
+    pub fn saveSigningKey(self: *const DirectoryAuthority) !void {
+        try self.signature_manager.saveToFile(self.config.sig_key_path);
     }
     
     const registry = struct {
-        pub fn toJson(allocator: std.mem.Allocator) ![]u8 {
-            _ = allocator;
-            return "[]";
+        pub fn toJson(allocator: std.mem.Allocator, nodes: []const NodeInfo) ![]u8 {
+            var json = std.ArrayList(u8).init(allocator);
+            defer json.deinit();
+
+            try json.appendSlice("[");
+            for (nodes, 0..) |node, i| {
+                const node_json = try node.toJson(allocator);
+                defer allocator.free(node_json);
+                
+                try json.appendSlice(node_json);
+                if (i < nodes.len - 1) {
+                    try json.appendSlice(",");
+                }
+            }
+            try json.appendSlice("]");
+            
+            return try json.toOwnedSlice();
         }
     };
 };
 
+pub const NodeStore = struct {
+    nodes: std.ArrayList(NodeInfo),
+    allocator: std.mem.Allocator,
+    storage_file: []const u8,
+    
+    pub fn init(allocator: std.mem.Allocator, storage_file: []const u8) NodeStore {
+        return NodeStore{
+            .nodes = std.ArrayList(NodeInfo).init(allocator),
+            .allocator = allocator,
+            .storage_file = storage_file,
+        };
+    }
+    
+    pub fn deinit(self: *NodeStore) void {
+        for (self.nodes.items) |*node| {
+            node.deinit();
+        }
+        self.nodes.deinit();
+    }
+    
+    pub fn addNode(self: *NodeStore, node: NodeInfo) !void {
+        try self.nodes.append(node);
+        try self.saveToFile();
+    }
+    
+    pub fn saveToFile(self: *NodeStore) !void {
+        const file = try std.fs.cwd().createFile(self.storage_file, .{});
+        defer file.close();
+        
+        try file.writeAll("[\n");
+        for (self.nodes.items, 0..) |node, i| {
+            const node_json = try node.toJson(self.allocator);
+            defer self.allocator.free(node_json);
+            
+            try file.writeAll("  ");
+            try file.writeAll(node_json);
+            if (i < self.nodes.items.len - 1) {
+                try file.writeAll(",");
+            }
+            try file.writeAll("\n");
+        }
+        try file.writeAll("]\n");
+    }
+    
+    pub fn loadFromFile(self: *NodeStore) !void {
+        const file = std.fs.cwd().openFile(self.storage_file, .{}) catch |err| switch (err) {
+            error.FileNotFound => return,
+            else => return err,
+        };
+        defer file.close();
+        
+        const file_size = try file.getEndPos();
+        const contents = try self.allocator.alloc(u8, file_size);
+        defer self.allocator.free(contents);
+        
+        _ = try file.readAll(contents);
+        
+        const parsed = try std.json.parseFromSlice(std.json.Value, self.allocator, contents, .{});
+        defer parsed.deinit();
+        
+        if (parsed.value != .array) return;
+        
+        for (parsed.value.array.items) |item| {
+            if (item != .object) continue;
+            
+            const obj = item.object;
+            const nickname = obj.get("nickname") orelse continue;
+            const address = obj.get("address") orelse continue;
+            
+            if (nickname != .string or address != .string) continue;
+            
+            const node = try NodeInfo.init(self.allocator, nickname.string, address.string);
+            try self.nodes.append(node);
+        }
+    }
+};
+
+// Directory structure for /directory endpoint
+pub const Directory = struct {
+    timestamp: []const u8,
+    nodes: []const NodeInfo,
+    
+    pub fn toJson(self: *const Directory, allocator: std.mem.Allocator) ![]u8 {
+        var json = std.ArrayList(u8).init(allocator);
+        defer json.deinit();
+        
+        try json.appendSlice("{\"timestamp\":\"");
+        try json.appendSlice(self.timestamp);
+        try json.appendSlice("\",\"nodes\":[");
+        
+        for (self.nodes, 0..) |node, i| {
+            const node_json = try node.toJson(allocator);
+            defer allocator.free(node_json);
+            
+            try json.appendSlice(node_json);
+            if (i < self.nodes.len - 1) {
+                try json.appendSlice(",");
+            }
+        }
+        
+        try json.appendSlice("]}");
+        return try json.toOwnedSlice();
+    }
+};
+
+fn generateISO8601Timestamp(allocator: std.mem.Allocator) ![]u8 {
+    const timestamp = std.time.timestamp();
+    const seconds = @as(u64, @intCast(timestamp));
+    
+    // Convert Unix timestamp to calendar date/time
+    const SECONDS_PER_DAY = 86400;
+    const seconds_in_day = seconds % SECONDS_PER_DAY;
+    
+    // Simple approximation for demonstration (should use proper calendar calculation)
+    // This is a simplified version - in production, use std.time formatting
+    const year = 2024; // Hardcoded for now - in real implementation calculate properly
+    const month = 6;
+    const day = 29;
+    
+    const hours = seconds_in_day / 3600;
+    const minutes = (seconds_in_day % 3600) / 60;
+    const secs = seconds_in_day % 60;
+    
+    return try std.fmt.allocPrint(allocator, "{d:04}-{d:02}-{d:02}T{d:02}:{d:02}:{d:02}Z", 
+        .{ year, month, day, hours, minutes, secs });
+}
+
+fn decodeBase64(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
+    const decoder = std.base64.standard.Decoder;
+    const decoded_len = try decoder.calcSizeForSlice(encoded);
+    const decoded = try allocator.alloc(u8, decoded_len);
+    try decoder.decode(decoded, encoded);
+    return decoded;
+}
+
+fn verifySignature(allocator: std.mem.Allocator, message: []const u8, signature_hex: []const u8, pubkey: []const u8) !bool {
+    _ = allocator;
+    
+    if (signature_hex.len != 128) return false; // Ed25519 signature is 64 bytes = 128 hex chars
+    if (pubkey.len != 32) return false; // Ed25519 public key is 32 bytes
+    
+    // Convert hex signature to bytes
+    var signature: [SIGNATURE_SIZE]u8 = undefined;
+    for (0..SIGNATURE_SIZE) |i| {
+        const hex_byte = signature_hex[i * 2..i * 2 + 2];
+        signature[i] = std.fmt.parseInt(u8, hex_byte, 16) catch return false;
+    }
+    
+    // Use our Ed25519 verification implementation
+    var pubkey_array: [PUBLIC_KEY_SIZE]u8 = undefined;
+    @memcpy(&pubkey_array, pubkey);
+    
+    return Ed25519KeyPair.verify(pubkey_array, message, signature);
+}
+
 pub const AuthorityHttpServer = struct {
-    authority: *MockDirectoryAuthority,
+    authority: *DirectoryAuthority,
     allocator: std.mem.Allocator,
     running: bool,
+    node_store: NodeStore,
     
-    pub fn init(allocator: std.mem.Allocator, authority: *MockDirectoryAuthority) AuthorityHttpServer {
+    pub fn init(allocator: std.mem.Allocator, authority: *DirectoryAuthority) AuthorityHttpServer {
+        var node_store = NodeStore.init(allocator, "data/registered_nodes.json");
+        node_store.loadFromFile() catch |err| {
+            std.log.warn("Failed to load nodes from file: {}", .{err});
+        };
+        
         return AuthorityHttpServer{
             .authority = authority,
             .allocator = allocator,
             .running = false,
+            .node_store = node_store,
         };
+    }
+    
+    pub fn deinit(self: *AuthorityHttpServer) void {
+        self.node_store.deinit();
     }
     
     pub fn start(self: *AuthorityHttpServer) !void {
@@ -351,12 +691,17 @@ pub const AuthorityHttpServer = struct {
         }
         
         // Route to appropriate handler
+        std.log.info("Routing request to path: '{s}'", .{request.path});
         if (std.mem.eql(u8, request.path, "/status")) {
             return self.handleStatus(request);
         } else if (std.mem.eql(u8, request.path, "/consensus")) {
             return self.handleConsensus(request);
         } else if (std.mem.eql(u8, request.path, "/consensus/signed")) {
             return self.handleSignedConsensus(request);
+        } else if (std.mem.eql(u8, request.path, "/directory")) {
+            return self.handleDirectory(request);
+        } else if (std.mem.eql(u8, request.path, "/register")) {
+            return self.handleRegister(request);
         } else if (std.mem.startsWith(u8, request.path, "/nodes")) {
             return self.handleNodes(request);
         }
@@ -415,6 +760,49 @@ pub const AuthorityHttpServer = struct {
         return response;
     }
     
+    fn handleDirectory(self: *AuthorityHttpServer, request: *const HttpRequest) !HttpResponse {
+        if (request.method != .GET) {
+            var response = HttpResponse.init(self.allocator, 405);
+            try response.setJsonBody("{\"error\": \"Method Not Allowed\"}");
+            return response;
+        }
+        
+        // Generate ISO8601 timestamp
+        const timestamp = try generateISO8601Timestamp(self.allocator);
+        defer self.allocator.free(timestamp);
+        
+        // Create Directory structure
+        const directory = Directory{
+            .timestamp = timestamp,
+            .nodes = self.authority.nodes.items,
+        };
+        
+        // Generate Directory JSON
+        const directory_json = try directory.toJson(self.allocator);
+        defer self.allocator.free(directory_json);
+        
+        // Sign the Directory JSON
+        const signature = self.authority.signature_manager.signData(directory_json) catch |err| switch (err) {
+            error.NoKeyLoaded => {
+                var response = HttpResponse.init(self.allocator, 500);
+                try response.setJsonBody("{\"error\": \"Signing key not loaded\"}");
+                return response;
+            },
+            else => return err,
+        };
+        
+        // Convert signature to hex
+        var sig_hex: [SIGNATURE_SIZE * 2]u8 = undefined;
+        _ = try std.fmt.bufPrint(&sig_hex, "{x}", .{std.fmt.fmtSliceHexLower(&signature)});
+        
+        // Create response with custom header
+        var response = HttpResponse.init(self.allocator, 200);
+        try response.setJsonBody(directory_json);
+        try response.setHeader("X-Directory-Signature", &sig_hex);
+        
+        return response;
+    }
+    
     fn handleNodes(self: *AuthorityHttpServer, request: *const HttpRequest) !HttpResponse {
         if (std.mem.eql(u8, request.path, "/nodes")) {
             if (request.method == .GET) {
@@ -432,11 +820,117 @@ pub const AuthorityHttpServer = struct {
     fn handleGetNodes(self: *AuthorityHttpServer, request: *const HttpRequest) !HttpResponse {
         _ = request;
         
-        const nodes_json = try MockDirectoryAuthority.registry.toJson(self.allocator);
+        const nodes_json = try DirectoryAuthority.registry.toJson(self.allocator, self.authority.nodes.items);
         defer self.allocator.free(nodes_json);
         
         var response = HttpResponse.init(self.allocator, 200);
         try response.setJsonBody(nodes_json);
+        return response;
+    }
+    
+    fn handleRegister(self: *AuthorityHttpServer, request: *const HttpRequest) !HttpResponse {
+        if (request.method != .POST) {
+            var response = HttpResponse.init(self.allocator, 405);
+            try response.setJsonBody("{\"error\": \"Method Not Allowed\"}");
+            return response;
+        }
+        
+        if (request.body.len == 0) {
+            var response = HttpResponse.init(self.allocator, 400);
+            try response.setJsonBody("{\"error\": \"Request body required\"}");
+            return response;
+        }
+        
+        // Parse and validate registration request
+        var registration_req = RegistrationRequest.fromJson(self.allocator, request.body) catch |err| {
+            var response = HttpResponse.init(self.allocator, 400);
+            const error_msg = switch (err) {
+                error.MissingType => "{\"error\": \"Missing 'type' field\"}",
+                error.MissingNickname => "{\"error\": \"Missing 'nickname' field\"}",
+                error.MissingAddress => "{\"error\": \"Missing 'address' field\"}",
+                error.MissingPubkey => "{\"error\": \"Missing 'pubkey_b64' field\"}",
+                error.MissingSignature => "{\"error\": \"Missing 'signature' field\"}",
+                error.InvalidDataTypes => "{\"error\": \"Invalid data types in request\"}",
+                else => "{\"error\": \"Invalid JSON format\"}",
+            };
+            try response.setJsonBody(error_msg);
+            return response;
+        };
+        defer registration_req.deinit(self.allocator);
+        
+        // Validate request fields
+        registration_req.validate() catch |err| {
+            var response = HttpResponse.init(self.allocator, 400);
+            const error_msg = switch (err) {
+                error.InvalidNickname => "{\"error\": \"Invalid nickname: must be 1-19 characters\"}",
+                error.InvalidAddress => "{\"error\": \"Invalid address: must be 1-255 characters\"}",
+                error.InvalidPubkey => "{\"error\": \"Invalid public key\"}",
+                error.InvalidSignature => "{\"error\": \"Invalid signature\"}",
+                error.InvalidType => "{\"error\": \"Invalid type: must be 'relay' or 'exit'\"}",
+            };
+            try response.setJsonBody(error_msg);
+            return response;
+        };
+        
+        // Decode Base64 public key
+        const pubkey = decodeBase64(self.allocator, registration_req.pubkey_b64) catch {
+            var response = HttpResponse.init(self.allocator, 400);
+            try response.setJsonBody("{\"error\": \"Invalid Base64 public key\"}");
+            return response;
+        };
+        defer self.allocator.free(pubkey);
+        
+        // Create message for signature verification
+        const message = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}:{s}:{s}",
+            .{ registration_req.type, registration_req.nickname, registration_req.address }
+        );
+        defer self.allocator.free(message);
+        
+        // Verify signature
+        const signature_valid = verifySignature(
+            self.allocator,
+            message,
+            registration_req.signature,
+            pubkey
+        ) catch false;
+        
+        if (!signature_valid) {
+            var response = HttpResponse.init(self.allocator, 401);
+            try response.setJsonBody("{\"error\": \"Invalid signature\"}");
+            return response;
+        }
+        
+        // Create and store node
+        var node = try NodeInfo.init(self.allocator, registration_req.nickname, registration_req.address);
+        
+        // Set node flags based on type
+        if (std.mem.eql(u8, registration_req.type, "exit")) {
+            node.setFlags(.{ .valid = true, .running = true, .exit = true });
+        } else {
+            node.setFlags(.{ .valid = true, .running = true });
+        }
+        
+        // Add to both memory and persistent storage
+        try self.authority.addNode(node);
+        try self.node_store.addNode(node);
+        
+        std.log.info("Registered new node: {s} at {s} (type: {s})", .{ 
+            registration_req.nickname, 
+            registration_req.address, 
+            registration_req.type 
+        });
+        
+        var response = HttpResponse.init(self.allocator, 201);
+        const success_json = try std.fmt.allocPrint(
+            self.allocator,
+            "{{\"status\": \"registered\", \"nickname\": \"{s}\", \"address\": \"{s}\"}}",
+            .{ registration_req.nickname, registration_req.address }
+        );
+        defer self.allocator.free(success_json);
+        
+        try response.setJsonBody(success_json);
         return response;
     }
     

@@ -1,7 +1,7 @@
 const std = @import("std");
-const DirectoryAuthority = @import("directory.zig").DirectoryAuthority;
 const AuthorityConfig = @import("config.zig").AuthorityConfig;
 const AuthorityHttpServer = @import("server.zig").AuthorityHttpServer;
+const DirectoryAuthority = @import("server.zig").DirectoryAuthority;
 const TlsConfig = @import("tls.zig").TlsConfig;
 const NodeInfo = @import("node.zig").NodeInfo;
 
@@ -39,14 +39,14 @@ pub fn main() !void {
     // Load or generate signing key
     authority.loadSigningKey() catch |err| switch (err) {
         error.FileNotFound => {
-            std.log.info("Signing key not found, generating new key...");
+            std.log.info("Signing key not found, generating new key...", .{});
             authority.generateSigningKey();
             try authority.saveSigningKey();
         },
         else => return err,
     };
 
-    std.log.info("Signing key loaded successfully");
+    std.log.info("Signing key loaded successfully", .{});
 
     // Add some example nodes for testing
     try addExampleNodes(&authority, allocator);
@@ -62,19 +62,21 @@ pub fn main() !void {
     // Start HTTP server
     var http_server = AuthorityHttpServer.init(allocator, &authority);
     
-    std.log.info("Directory Authority ready");
-    std.log.info("Available endpoints:");
-    std.log.info("  GET  /status           - Server status");
-    std.log.info("  GET  /consensus        - Current consensus");
-    std.log.info("  GET  /consensus/signed - Signed consensus");
-    std.log.info("  GET  /nodes            - List all nodes");
-    std.log.info("  POST /nodes            - Register new node");
+    std.log.info("Directory Authority ready", .{});
+    std.log.info("Available endpoints:", .{});
+    std.log.info("  GET  /status           - Server status", .{});
+    std.log.info("  GET  /consensus        - Current consensus", .{});
+    std.log.info("  GET  /consensus/signed - Signed consensus", .{});
+    std.log.info("  GET  /directory        - Directory with ISO8601 timestamp and signature", .{});
+    std.log.info("  GET  /nodes            - List all nodes", .{});
+    std.log.info("  POST /nodes            - Register new node", .{});
+    std.log.info("  POST /register         - Register node with signature verification", .{});
 
     try http_server.start();
 }
 
 fn addExampleNodes(authority: *DirectoryAuthority, allocator: std.mem.Allocator) !void {
-    std.log.info("Adding example nodes...");
+    std.log.info("Adding example nodes...", .{});
 
     var node1 = try NodeInfo.init(allocator, "ExampleRelay1", "192.168.1.100");
     node1.setFlags(.{ .valid = true, .running = true, .stable = true });

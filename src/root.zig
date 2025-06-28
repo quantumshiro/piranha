@@ -4,6 +4,12 @@
 const std = @import("std");
 const testing = std.testing;
 
+// Re-export common modules
+pub const crypto = @import("common/crypto.zig");
+pub const signature = @import("common/signature.zig");
+pub const cell = @import("common/cell.zig");
+pub const net = @import("common/net.zig");
+
 pub export fn add(a: i32, b: i32) i32 {
     return a + b;
 }
