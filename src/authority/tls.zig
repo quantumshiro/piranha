@@ -172,7 +172,7 @@ pub const TlsServer = struct {
         };
         defer self.allocator.free(key_data);
         
-        std.log.info("TLS certificate and private key loaded successfully");
+        std.log.info("TLS certificate and private key loaded successfully", .{});
     }
 };
 

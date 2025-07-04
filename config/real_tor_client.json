@@ -1,0 +1,23 @@
+{
+  "authority_addr": "128.31.0.39:9131",
+  "use_real_tor_network": true,
+  "socks_listen_addr": "127.0.0.1:9050",
+  "circuit_length": 3,
+  "max_circuits": 10,
+  "circuit_timeout_seconds": 60,
+  "connection_timeout_seconds": 10,
+  "retry_attempts": 3,
+  "user_agent": "Piranha-Client/1.0",
+  "enable_logging": true,
+  "log_level": "info",
+  "tor_authorities": [
+    "128.31.0.39:9131",
+    "86.59.21.38:80",
+    "194.109.206.212:80",
+    "131.188.40.189:80",
+    "193.23.244.244:80",
+    "171.25.193.9:443",
+    "154.35.175.225:80",
+    "199.58.81.140:80"
+  ]
+}

@@ -78,6 +78,20 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Create exit module
+    const exit_mod = b.createModule(.{
+        .root_source_file = b.path("src/exit/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Create client module
+    const client_mod = b.createModule(.{
+        .root_source_file = b.path("src/client/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Add common module imports to exe_mod
     exe_mod.addImport("crypto", crypto_mod);
     exe_mod.addImport("signature", signature_mod);
@@ -90,11 +104,25 @@ pub fn build(b: *std.Build) void {
     authority_mod.addImport("cell", cell_mod);
     authority_mod.addImport("net", net_mod);
 
+    // Add common module imports to exit_mod
+    exit_mod.addImport("crypto", crypto_mod);
+    exit_mod.addImport("signature", signature_mod);
+    exit_mod.addImport("cell", cell_mod);
+    exit_mod.addImport("net", net_mod);
+
+    // Add common module imports to client_mod
+    client_mod.addImport("crypto", crypto_mod);
+    client_mod.addImport("signature", signature_mod);
+    client_mod.addImport("cell", cell_mod);
+    client_mod.addImport("net", net_mod);
+
     // Modules can depend on one another using the `std.Build.Module.addImport` function.
     // This is what allows Zig source code to use `@import("foo")` where 'foo' is not a
     // file path. In this case, we set up `exe_mod` to import `lib_mod`.
     exe_mod.addImport("piranha_lib", lib_mod);
     authority_mod.addImport("piranha_lib", lib_mod);
+    exit_mod.addImport("piranha_lib", lib_mod);
+    client_mod.addImport("piranha_lib", lib_mod);
 
     // Now, we will create a static library based on the module we created above.
     // This creates a `std.Build.Step.Compile`, which is the build step responsible
@@ -130,12 +158,58 @@ pub fn build(b: *std.Build) void {
     });
     auth.linkLibC();
 
+    // Create exit executable
+    const exit_exe = b.addExecutable(.{
+        .name = "piranha-exit",
+        .root_module = exit_mod,
+    });
+
+    // Add exit executable using the requested format
+    const exit = b.addExecutable(.{
+        .name = "exit",
+        .root_module = exit_mod,
+    });
+    exit.linkLibC();
+
+    // Create client executable
+    const client_exe = b.addExecutable(.{
+        .name = "piranha-client",
+        .root_module = client_mod,
+    });
+
+    // Add client executable using the requested format
+    const client = b.addExecutable(.{
+        .name = "client",
+        .root_module = client_mod,
+    });
+    client.linkLibC();
+
+    // Web fetcher executable
+    const fetch_exe = b.addExecutable(.{
+        .name = "piranha-fetch",
+        .root_source_file = b.path("src/piranha_fetch.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    // Add common module imports to fetch_exe
+    fetch_exe.root_module.addImport("crypto", crypto_mod);
+    fetch_exe.root_module.addImport("signature", signature_mod);
+    fetch_exe.root_module.addImport("cell", cell_mod);
+    fetch_exe.root_module.addImport("net", net_mod);
+    fetch_exe.root_module.addImport("piranha_lib", lib_mod);
+
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
     b.installArtifact(exe);
     b.installArtifact(authority_exe);
     b.installArtifact(auth);
+    b.installArtifact(exit_exe);
+    b.installArtifact(exit);
+    b.installArtifact(client_exe);
+    b.installArtifact(client);
+    b.installArtifact(fetch_exe);
 
     // This *creates* a Run step in the build graph, to be executed when another
     // step is evaluated that depends on it. The next line below will establish
@@ -143,6 +217,10 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     const authority_run_cmd = b.addRunArtifact(authority_exe);
     const auth_run_cmd = b.addRunArtifact(auth);
+    const exit_run_cmd = b.addRunArtifact(exit_exe);
+    const exit_cmd = b.addRunArtifact(exit);
+    const client_run_cmd = b.addRunArtifact(client_exe);
+    const client_cmd = b.addRunArtifact(client);
 
     // By making the run step depend on the install step, it will be run from the
     // installation directory rather than directly from within the cache directory.
@@ -151,6 +229,10 @@ pub fn build(b: *std.Build) void {
     run_cmd.step.dependOn(b.getInstallStep());
     authority_run_cmd.step.dependOn(b.getInstallStep());
     auth_run_cmd.step.dependOn(b.getInstallStep());
+    exit_run_cmd.step.dependOn(b.getInstallStep());
+    exit_cmd.step.dependOn(b.getInstallStep());
+    client_run_cmd.step.dependOn(b.getInstallStep());
+    client_cmd.step.dependOn(b.getInstallStep());
 
     // This allows the user to pass arguments to the application in the build
     // command itself, like this: `zig build run -- arg1 arg2 etc`
@@ -158,6 +240,10 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
         authority_run_cmd.addArgs(args);
         auth_run_cmd.addArgs(args);
+        exit_run_cmd.addArgs(args);
+        exit_cmd.addArgs(args);
+        client_run_cmd.addArgs(args);
+        client_cmd.addArgs(args);
     }
 
     // This creates a build step. It will be visible in the `zig build --help` menu,
@@ -171,6 +257,18 @@ pub fn build(b: *std.Build) void {
     
     const auth_run_step = b.step("run-auth", "Run the authority executable");
     auth_run_step.dependOn(&auth_run_cmd.step);
+
+    const exit_run_step = b.step("run-exit", "Run the Exit Node server");
+    exit_run_step.dependOn(&exit_run_cmd.step);
+    
+    const exit_step = b.step("run-exit-node", "Run the exit node executable");
+    exit_step.dependOn(&exit_cmd.step);
+
+    const client_run_step = b.step("run-client", "Run the Piranha Client");
+    client_run_step.dependOn(&client_run_cmd.step);
+    
+    const client_step = b.step("run-client-proxy", "Run the client proxy executable");
+    client_step.dependOn(&client_cmd.step);
 
     // Creates a step for unit testing. This only builds the test executable
     // but does not run it.

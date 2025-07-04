@@ -1,0 +1,12 @@
+{
+  "authority_addr": "127.0.0.1:8443",
+  "socks_listen_addr": "127.0.0.1:9050",
+  "circuit_length": 3,
+  "max_circuits": 10,
+  "circuit_timeout_seconds": 300,
+  "connection_timeout_seconds": 30,
+  "retry_attempts": 3,
+  "user_agent": "Piranha-Client/1.0",
+  "enable_logging": true,
+  "log_level": "info"
+}

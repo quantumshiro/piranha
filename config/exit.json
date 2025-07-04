@@ -1,0 +1,13 @@
+{
+  "listen_addr": "0.0.0.0:9003",
+  "max_circuits": 1024,
+  "tls_enabled": false,
+  "exit_policy": [
+    "0.0.0.0/0:80",
+    "0.0.0.0/0:443",
+    "0.0.0.0/0:8080",
+    "0.0.0.0/0:8443"
+  ],
+  "timeout_seconds": 30,
+  "max_connections": 100
+}

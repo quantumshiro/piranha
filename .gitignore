@@ -1,4 +1,6 @@
 .zig-cache
 zig-out
 CLAUDE.md
+docs/
+.agent.md
 
