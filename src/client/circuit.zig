@@ -1,10 +1,10 @@
 const std = @import("std");
 const net = std.net;
-const lib = @import("piranha_lib");
-const Cell = lib.cell.Cell;
-const CellCommand = lib.cell.CellCommand;
-const crypto = lib.crypto;
-const ntor = lib.ntor;
+// const lib = @import("piranha_lib");
+// const Cell = lib.cell.Cell;
+// const CellCommand = lib.cell.CellCommand;
+// const crypto = lib.crypto;
+// const ntor = lib.ntor;
 
 pub const CircuitId = u16;
 pub const StreamId = u16;
@@ -121,8 +121,19 @@ pub const Circuit = struct {
         self.hops.deinit();
     }
 
-    pub fn addHop(self: *Circuit, node: NodeInfo) !void {
-        const hop = CircuitHop.init(node);
+    pub fn addHop(self: *Circuit, node: *const NodeInfo) !void {
+        // ノードをディープコピーして所有権を移す
+        const node_copy = NodeInfo{
+            .nickname = try self.allocator.dupe(u8, node.nickname),
+            .address = try self.allocator.dupe(u8, node.address),
+            .port = node.port,
+            .identity_key = node.identity_key,
+            .ntor_key = node.ntor_key,
+            .flags = node.flags,
+            .allocator = self.allocator,
+        };
+        
+        const hop = CircuitHop.init(node_copy);
         try self.hops.append(hop);
     }
 
@@ -208,11 +219,21 @@ pub const CircuitManager = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
+        // アロケータの有効性をチェック
+        if (@intFromPtr(self.allocator.ptr) == 0) {
+            std.log.err("CircuitManager allocator is null", .{});
+            return error.InvalidAllocator;
+        }
+
         const circuit_id = self.next_circuit_id;
         self.next_circuit_id +%= 1;
 
-        // ヒープに回路を作成
-        const circuit = try self.allocator.create(Circuit);
+        // より安全な方法でヒープに回路を作成
+        const circuit = self.allocator.create(Circuit) catch |err| {
+            std.log.err("Failed to allocate memory for circuit {}: {}", .{ circuit_id, err });
+            return err;
+        };
+        
         circuit.* = Circuit.init(self.allocator, circuit_id);
         
         const entry = CircuitEntry{
@@ -327,29 +348,62 @@ pub const NodeSelector = struct {
 
         // Add new nodes
         for (new_nodes) |node| {
-            var node_copy = try NodeInfo.init(
-                self.allocator,
-                node.nickname,
-                node.address,
-                node.port,
-            );
-            // フラグもコピー
-            node_copy.flags = node.flags;
-            node_copy.identity_key = node.identity_key;
-            node_copy.ntor_key = node.ntor_key;
+            // ディープコピーを作成
+            const node_copy = NodeInfo{
+                .nickname = try self.allocator.dupe(u8, node.nickname),
+                .address = try self.allocator.dupe(u8, node.address),
+                .port = node.port,
+                .identity_key = node.identity_key,
+                .ntor_key = node.ntor_key,
+                .flags = node.flags,
+                .allocator = self.allocator,
+            };
             try self.nodes.append(node_copy);
         }
 
         std.log.info("Updated node list: {} nodes available", .{self.nodes.items.len});
     }
 
-    pub fn selectGuardNode(self: *NodeSelector) ?NodeInfo {
+    pub fn selectGuardNode(self: *NodeSelector) ?*NodeInfo {
         var candidates = std.ArrayList(*NodeInfo).init(self.allocator);
         defer candidates.deinit();
 
-        for (self.nodes.items) |*node| {
-            if (node.isUsableAsGuard()) {
-                candidates.append(node) catch continue;
+        // 信頼できるポートのノードを優先的に選択
+        const preferred_ports = [_]u16{ 443, 9001, 80, 9030 };
+        
+        for (preferred_ports) |preferred_port| {
+            for (self.nodes.items) |*node| {
+                if (node.isUsableAsGuard() and node.port == preferred_port) {
+                    // 大きなTorリレーの名前パターンを優先
+                    if (std.mem.indexOf(u8, node.nickname, "exit") != null or
+                        std.mem.indexOf(u8, node.nickname, "relay") != null or
+                        std.mem.indexOf(u8, node.nickname, "tor") != null or
+                        std.mem.indexOf(u8, node.nickname, "node") != null) {
+                        candidates.append(node) catch continue;
+                    }
+                }
+            }
+            if (candidates.items.len >= 10) break; // 十分な候補がある場合は停止
+        }
+        
+        // 候補が少ない場合は、標準的なポートのすべてのガードノードを追加
+        if (candidates.items.len < 5) {
+            for (self.nodes.items) |*node| {
+                if (node.isUsableAsGuard()) {
+                    if (node.port == 443 or node.port == 9001 or node.port == 80) {
+                        candidates.append(node) catch continue;
+                    }
+                }
+            }
+        }
+
+        if (candidates.items.len == 0) {
+            std.log.warn("No guard nodes found with common ports, trying all guard nodes", .{});
+            // フォールバック：すべてのガードノードを試す
+            for (self.nodes.items) |*node| {
+                if (node.isUsableAsGuard()) {
+                    candidates.append(node) catch continue;
+                }
             }
         }
 
@@ -358,11 +412,15 @@ pub const NodeSelector = struct {
         const index = self.rng.random().uintLessThan(usize, candidates.items.len);
         const selected = candidates.items[index];
 
-        std.log.debug("Selected guard node: {s}", .{selected.nickname});
-        return selected.*;
+        std.log.debug("Selected guard node: {s} ({s}:{d}) from {} candidates", .{
+            selected.nickname, selected.address, selected.port, candidates.items.len
+        });
+        
+        // 既存のノードへのポインタを返す（コピーしない）
+        return selected;
     }
 
-    pub fn selectMiddleNode(self: *NodeSelector, exclude_nodes: []const NodeInfo) ?NodeInfo {
+    pub fn selectMiddleNode(self: *NodeSelector, exclude_nodes: []*const NodeInfo) ?*NodeInfo {
         var candidates = std.ArrayList(*NodeInfo).init(self.allocator);
         defer candidates.deinit();
 
@@ -385,10 +443,12 @@ pub const NodeSelector = struct {
         const selected = candidates.items[index];
 
         std.log.debug("Selected middle node: {s}", .{selected.nickname});
-        return selected.*;
+        
+        // 既存のノードへのポインタを返す（コピーしない）
+        return selected;
     }
 
-    pub fn selectExitNode(self: *NodeSelector, exclude_nodes: []const NodeInfo) ?NodeInfo {
+    pub fn selectExitNode(self: *NodeSelector, exclude_nodes: []*const NodeInfo) ?*NodeInfo {
         var candidates = std.ArrayList(*NodeInfo).init(self.allocator);
         defer candidates.deinit();
 
@@ -411,7 +471,9 @@ pub const NodeSelector = struct {
         const selected = candidates.items[index];
 
         std.log.debug("Selected exit node: {s}", .{selected.nickname});
-        return selected.*;
+        
+        // 既存のノードへのポインタを返す（コピーしない）
+        return selected;
     }
 
     pub fn getNodeCount(self: *const NodeSelector) usize {
@@ -465,7 +527,7 @@ test "Node selection" {
     try std.testing.expect(selected_guard != null);
     try std.testing.expectEqualStrings("GuardNode", selected_guard.?.nickname);
 
-    const selected_exit = selector.selectExitNode(&[_]NodeInfo{});
+    const selected_exit = selector.selectExitNode(&[_]*const NodeInfo{});
     try std.testing.expect(selected_exit != null);
     try std.testing.expectEqualStrings("ExitNode", selected_exit.?.nickname);
 }

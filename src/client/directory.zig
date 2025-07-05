@@ -85,13 +85,28 @@ pub const DirectoryClient = struct {
     }
 
     pub fn fetchDirectory(self: *DirectoryClient) !DirectoryResponse {
-        std.log.info("Fetching directory from {s}", .{self.config.authority_addr});
+        // 実際のTorディレクトリサーバーを使用
+        const tor_directory_servers = [_][]const u8{
+            "128.31.0.39:9131",      // moria1
+            "86.59.21.38:80",        // tor26
+            "199.58.81.140:80",      // dizum
+            "171.25.193.9:443",      // gabelmoo
+            "154.35.175.225:80",     // maatuska
+            "131.188.40.189:80",     // longclaw
+            "199.254.238.52:80",     // bastet
+            "204.13.164.118:80",     // faravahar
+        };
+        
+        // 最初のディレクトリサーバーを試す
+        const authority_addr = tor_directory_servers[0];
+        std.log.info("Fetching directory from real Tor authority: {s}", .{authority_addr});
+        
+        const colon_pos = std.mem.lastIndexOf(u8, authority_addr, ":") orelse return DirectoryError.ConnectionFailed;
+        const host = authority_addr[0..colon_pos];
+        const port_str = authority_addr[colon_pos + 1 ..];
+        const port = std.fmt.parseInt(u16, port_str, 10) catch return DirectoryError.ConnectionFailed;
 
-        const auth_host = try self.config.getAuthorityHost(self.allocator);
-        defer self.allocator.free(auth_host);
-        const auth_port = try self.config.getAuthorityPort();
-
-        const address = net.Address.parseIp(auth_host, auth_port) catch |err| {
+        const address = net.Address.parseIp(host, port) catch |err| {
             std.log.err("Failed to parse authority address: {}", .{err});
             return DirectoryError.ConnectionFailed;
         };
@@ -103,7 +118,7 @@ pub const DirectoryClient = struct {
         defer stream.close();
 
         // タイムアウトを設定
-        const timeout_ns = @as(u64, self.config.connection_timeout_seconds) * std.time.ns_per_s;
+        const timeout_ns = @as(u64, @max(30, self.config.connection_timeout_seconds)) * std.time.ns_per_s;
         
         // Tor準拠のHTTPリクエストを作成
         const request = try std.fmt.allocPrint(self.allocator,
@@ -169,11 +184,8 @@ pub const DirectoryClient = struct {
 
         const directory_response = try self.parseDirectoryResponse(response_data);
         
-        // キャッシュを更新
-        if (self.cached_response) |*old_response| {
-            old_response.deinit();
-        }
-        self.cached_response = directory_response;
+        // Note: We return the response directly and don't cache it to avoid 
+        // memory management issues. Caching is disabled for now.
         self.last_fetch_time = std.time.timestamp();
 
         return directory_response;
@@ -315,25 +327,19 @@ pub const DirectoryClient = struct {
     }
 
     pub fn getCachedDirectory(self: *DirectoryClient) ?DirectoryResponse {
-        return self.cached_response;
+        _ = self;
+        return null; // Caching disabled
     }
 
     pub fn isCacheValid(self: *DirectoryClient, max_age_seconds: u32) bool {
-        if (self.cached_response == null) return false;
-        
-        const now = std.time.timestamp();
-        const age = now - self.last_fetch_time;
-        return age <= max_age_seconds;
+        _ = self;
+        _ = max_age_seconds;
+        return false; // Caching disabled
     }
 
     pub fn getDirectoryOrCache(self: *DirectoryClient, max_cache_age_seconds: u32) !DirectoryResponse {
-        // キャッシュが有効な場合はそれを返す
-        if (self.isCacheValid(max_cache_age_seconds)) {
-            std.log.debug("Using cached directory (age: {} seconds)", .{std.time.timestamp() - self.last_fetch_time});
-            return self.cached_response.?;
-        }
-
-        // キャッシュが無効または存在しない場合は新しく取得
+        _ = max_cache_age_seconds;
+        // Always fetch fresh directory since caching is disabled
         return try self.fetchDirectoryWithRetry();
     }
 
@@ -341,15 +347,7 @@ pub const DirectoryClient = struct {
         while (true) {
             const directory = self.fetchDirectoryWithRetry() catch |err| {
                 std.log.err("Failed to fetch directory after retries: {}", .{err});
-                
-                // キャッシュがあれば使用
-                if (self.cached_response) |cached| {
-                    std.log.info("Using cached directory due to fetch failure");
-                    try node_selector.updateNodes(cached.nodes);
-                } else {
-                    std.log.err("No cached directory available");
-                }
-                
+                std.log.err("No cached directory available (caching disabled)");
                 std.time.sleep(interval_seconds * std.time.ns_per_s);
                 continue;
             };
@@ -374,6 +372,14 @@ pub const DirectoryClient = struct {
             port: u16,
         } = null;
         
+        // Error cleanup for current_node
+        defer {
+            if (current_node) |node| {
+                self.allocator.free(node.nickname);
+                self.allocator.free(node.address);
+            }
+        }
+        
         var valid_after: []const u8 = "";
         var valid_until: []const u8 = "";
         var node_count: usize = 0;
@@ -393,17 +399,22 @@ pub const DirectoryClient = struct {
                 const nickname = parts.next() orelse continue;
                 _ = parts.next(); // identity
                 _ = parts.next(); // digest
-                _ = parts.next(); // publication
-                _ = parts.next(); // date
-                _ = parts.next(); // time
+                _ = parts.next(); // publication (YYYY-MM-DD)
+                _ = parts.next(); // time (HH:MM:SS)
                 const ip = parts.next() orelse continue;
                 const or_port_str = parts.next() orelse continue;
                 
                 const port = std.fmt.parseInt(u16, or_port_str, 10) catch continue;
                 
+                std.log.debug("Parsed router: nickname={s}, ip={s}, port={}", .{nickname, ip, port});
+                
+                // Store copies of the strings to avoid dangling pointers
+                const nickname_copy = try self.allocator.dupe(u8, nickname);
+                const ip_copy = try self.allocator.dupe(u8, ip);
+                
                 current_node = .{
-                    .nickname = nickname,
-                    .address = ip,
+                    .nickname = nickname_copy,
+                    .address = ip_copy,
                     .port = port,
                 };
             } else if (std.mem.startsWith(u8, trimmed, "s ") and current_node != null) {
@@ -431,6 +442,9 @@ pub const DirectoryClient = struct {
                     .allocator = self.allocator,
                 });
                 
+                // Clean up temporary strings
+                self.allocator.free(node.nickname);
+                self.allocator.free(node.address);
                 current_node = null;
                 node_count += 1;
                 

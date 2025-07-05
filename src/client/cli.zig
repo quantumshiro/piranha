@@ -1,9 +1,10 @@
 const std = @import("std");
-const HttpOverTorClient = @import("http_client.zig").HttpOverTorClient;
+const TorHttpClient = @import("fetch.zig").TorHttpClient;
 const CircuitBuilder = @import("builder.zig").CircuitBuilder;
 const CircuitManager = @import("circuit.zig").CircuitManager;
 const NodeSelector = @import("circuit.zig").NodeSelector;
 const ClientConfig = @import("config.zig").ClientConfig;
+const DirectoryClient = @import("directory.zig").DirectoryClient;
 
 // CLI引数の構造
 pub const CliArgs = struct {
@@ -123,6 +124,20 @@ pub fn runCli() !void {
     std.log.info("Initializing Tor client...", .{});
     
     var config = ClientConfig.init(allocator);
+    config.authority_addr = try allocator.dupe(u8, "128.31.0.39:9131");
+    config.authority_addr_owned = true;
+    config.socks_listen_addr = try allocator.dupe(u8, "127.0.0.1:9050");
+    config.socks_listen_addr_owned = true;
+    config.circuit_length = 3;
+    config.max_circuits = 3;
+    config.circuit_timeout_seconds = 600;
+    config.connection_timeout_seconds = 30;
+    config.retry_attempts = 3;
+    config.user_agent = try allocator.dupe(u8, "Piranha-Tor-Client/1.0");
+    config.user_agent_owned = true;
+    config.enable_logging = true;
+    config.log_level = try allocator.dupe(u8, "info");
+    config.log_level_owned = true;
     defer config.deinit();
     
     var circuit_manager = CircuitManager.init(allocator);
@@ -132,9 +147,29 @@ pub fn runCli() !void {
     defer node_selector.deinit();
     
     var circuit_builder = CircuitBuilder.init(allocator, &config, &circuit_manager, &node_selector);
-    defer circuit_builder.deinit();
     
-    var http_client = HttpOverTorClient.init(allocator, &circuit_builder);
+    // ディレクトリサーバーからノードリストを取得
+    var directory_client = DirectoryClient.init(allocator, &config);
+    defer directory_client.deinit();
+    
+    std.log.info("Fetching Tor directory from real authorities...", .{});
+    var initial_directory = directory_client.fetchDirectoryWithRetry() catch |err| {
+        std.log.err("Failed to fetch initial directory: {}", .{err});
+        std.process.exit(1);
+    };
+    defer initial_directory.deinit();
+    
+    try node_selector.updateNodes(initial_directory.nodes);
+    std.log.info("Directory loaded with {} nodes", .{initial_directory.nodes.len});
+    
+    var http_client = TorHttpClient.init(allocator, &circuit_builder, &circuit_manager);
+    
+    // 回路を構築
+    std.log.info("Building Tor circuit...", .{});
+    _ = circuit_builder.buildCircuit() catch |err| {
+        std.log.err("Failed to build circuit: {}", .{err});
+        std.process.exit(1);
+    };
     
     // Webサイトのコンテンツを取得
     std.log.info("Fetching content via Tor network...", .{});
