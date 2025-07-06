@@ -41,6 +41,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const ntor_mod = b.createModule(.{
+        .root_source_file = b.path("src/common/ntor.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // This creates a "module", which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
     // Every executable or library we compile will be based on one or more modules.
@@ -59,6 +65,7 @@ pub fn build(b: *std.Build) void {
     lib_mod.addImport("signature", signature_mod);
     lib_mod.addImport("cell", cell_mod);
     lib_mod.addImport("net", net_mod);
+    lib_mod.addImport("ntor", ntor_mod);
 
     // We will also create a module for our other entry point, 'main.zig'.
     const exe_mod = b.createModule(.{
@@ -97,24 +104,28 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("signature", signature_mod);
     exe_mod.addImport("cell", cell_mod);
     exe_mod.addImport("net", net_mod);
+    exe_mod.addImport("ntor", ntor_mod);
 
     // Add common module imports to authority_mod
     authority_mod.addImport("crypto", crypto_mod);
     authority_mod.addImport("signature", signature_mod);
     authority_mod.addImport("cell", cell_mod);
     authority_mod.addImport("net", net_mod);
+    authority_mod.addImport("ntor", ntor_mod);
 
     // Add common module imports to exit_mod
     exit_mod.addImport("crypto", crypto_mod);
     exit_mod.addImport("signature", signature_mod);
     exit_mod.addImport("cell", cell_mod);
     exit_mod.addImport("net", net_mod);
+    exit_mod.addImport("ntor", ntor_mod);
 
     // Add common module imports to client_mod
     client_mod.addImport("crypto", crypto_mod);
     client_mod.addImport("signature", signature_mod);
     client_mod.addImport("cell", cell_mod);
     client_mod.addImport("net", net_mod);
+    client_mod.addImport("ntor", ntor_mod);
 
     // Modules can depend on one another using the `std.Build.Module.addImport` function.
     // This is what allows Zig source code to use `@import("foo")` where 'foo' is not a
@@ -197,6 +208,7 @@ pub fn build(b: *std.Build) void {
     fetch_exe.root_module.addImport("signature", signature_mod);
     fetch_exe.root_module.addImport("cell", cell_mod);
     fetch_exe.root_module.addImport("net", net_mod);
+    fetch_exe.root_module.addImport("ntor", ntor_mod);
     fetch_exe.root_module.addImport("piranha_lib", lib_mod);
 
     // This declares intent for the executable to be installed into the

@@ -59,6 +59,7 @@ pub const PiranhaClient = struct {
 
     pub fn deinit(self: *PiranhaClient) void {
         self.stop();
+        self.circuit_builder.deinit();
         self.circuit_manager.deinit();
         self.allocator.destroy(self.circuit_manager);
         self.node_selector.deinit();

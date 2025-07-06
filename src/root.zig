@@ -5,11 +5,11 @@ const std = @import("std");
 const testing = std.testing;
 
 // Re-export common modules
-pub const crypto = @import("common/crypto.zig");
-pub const signature = @import("common/signature.zig");
-pub const cell = @import("common/cell.zig");
-pub const net = @import("common/net.zig");
-pub const ntor = @import("common/ntor.zig");
+pub const crypto = @import("crypto");
+pub const signature = @import("signature");
+pub const cell = @import("cell");
+pub const net = @import("net");
+pub const ntor = @import("ntor");
 
 pub export fn add(a: i32, b: i32) i32 {
     return a + b;
